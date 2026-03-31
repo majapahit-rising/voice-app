@@ -5,6 +5,7 @@ import httpx
 import re
 
 from fastapi import FastAPI, WebSocket
+from fastapi import WebSocketDisconnect
 from fastapi.responses import JSONResponse
 import google.generativeai as genai
 
@@ -92,30 +93,31 @@ async def deepcall(ws: WebSocket):
 
     try:
         while True:
-            data = await ws.receive()
+            try:
+                data = await ws.receive()
+            except RuntimeError:
+                # client sudah disconnect
+                print("Client disconnected (runtime)")
+                break
 
             # =========================
-            # AUDIO STREAM MASUK
+            # AUDIO MASUK
             # =========================
             if "bytes" in data:
                 audio_buffer.extend(data["bytes"])
 
-                # INTERRUPT AI kalau user ngomong lagi
                 if is_ai_speaking:
                     await ws.send_json({"type": "interruption"})
                     is_ai_speaking = False
 
             # =========================
-            # CONTROL MESSAGE
+            # CONTROL
             # =========================
             elif "text" in data:
                 msg = json.loads(data["text"])
 
                 if msg.get("type") == "end-utterance":
 
-                    # =========================
-                    # 1. STT
-                    # =========================
                     user_text = await speech_to_text(bytes(audio_buffer))
 
                     await ws.send_json({
@@ -123,27 +125,17 @@ async def deepcall(ws: WebSocket):
                         "text": user_text
                     })
 
-                    # =========================
-                    # 2. GEMINI STREAM + TTS
-                    # =========================
                     async for sentence in stream_gemini_sentences(user_text):
 
                         is_ai_speaking = True
 
-                        # kirim text ke UI
                         await ws.send_json({
                             "type": "ai-text",
                             "text": sentence
                         })
 
-                        # =========================
-                        # TTS
-                        # =========================
                         audio_bytes = await text_to_speech(sentence)
 
-                        # =========================
-                        # STREAM AUDIO KE CLIENT
-                        # =========================
                         for i in range(0, len(audio_bytes), 1024):
                             await ws.send_bytes(audio_bytes[i:i+1024])
                             await asyncio.sleep(0.005)
@@ -151,9 +143,14 @@ async def deepcall(ws: WebSocket):
                     audio_buffer.clear()
                     is_ai_speaking = False
 
+    except WebSocketDisconnect:
+        print("Client disconnected cleanly")
+
     except Exception as e:
         print("WS ERROR:", e)
-        await ws.close()
+
+    finally:
+        print("Connection closed")
 
 # ======================================================
 # SIMPLE CHAT (DEBUG)
