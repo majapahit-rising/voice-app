@@ -2,17 +2,17 @@ import os
 import asyncio
 import httpx
 import google.generativeai as genai
-import mysql.connector # Library untuk MySQL
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # ======================================================
-# CONFIGURATION & DATABASE
+# CONFIGURATION
 # ======================================================
 
 app = FastAPI()
 
+# Middleware CORS untuk koneksi dari browser
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,69 +21,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Konfigurasi Database dari Cloudflare Tunnel
-# Gunakan alamat tunnel tanpa 'https://' untuk host database
-DB_CONFIG = {
-    "host": "number-studied-shaved-teach.trycloudflare.com",
-    "user": "ihubs_user",
-    "password": "1234qwer",
-    "database": "ihub_crm",
-    "port": 3306,
-    "auth_plugin": "caching_sha2_password" # Penting untuk MySQL 8.4
-}
-
+# API Keys & Model
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-AI_MODEL = os.getenv("AI_MODEL", "gemini-2.0-flash") # Update ke versi stabil terbaru
+AI_MODEL = os.getenv("AI_MODEL", "gemini-2.5-flash")
 
+# Endpoint Services
 STT_URL = "https://stt.skendern8n.com/stt"
 TTS_URL = "https://tts.skendern8n.com/tts"
 
+# Inisialisasi Gemini
 genai.configure(api_key=GEMINI_API_KEY)
+
+# Client HTTP dengan timeout panjang untuk proses berantai
 http_client = httpx.AsyncClient(timeout=45.0)
 
 # ======================================================
-# DATABASE FUNCTIONS
+# CORE FUNCTIONS
 # ======================================================
 
-async def get_welcome_message_from_db():
-    """Mengambil pesan welcome yang aktif dari database lokal."""
-    try:
-        # Menjalankan blocking database call di thread terpisah agar FastAPI tetap kencang
-        def fetch():
-            conn = mysql.connector.connect(**DB_CONFIG)
-            cursor = conn.cursor(dictionary=True)
-            
-            # Mengambil 1 pesan yang is_active = 1
-            query = "SELECT message_text FROM aiorder_welcome_messages WHERE is_active = 1 LIMIT 1"
-            cursor.execute(query)
-            result = cursor.fetchone()
-            
-            cursor.close()
-            conn.close()
-            return result["message_text"] if result else "Hello, how can I help you today?"
-
-        return await asyncio.to_thread(fetch)
-    except Exception as e:
-        print(f"❌ DB Error: {e}")
-        return "Hello, this is a fallback welcome message."
-
-# ==========================
-# CORE FUNCTIONS (STT/TTS)
-# ==========================
-
 async def speech_to_text(audio_bytes: bytes):
+    """Mengirim file audio WebM ke service STT."""
     files = {"file": ("audio.webm", audio_bytes, "audio/webm")}
     try:
         res = await http_client.post(STT_URL, files=files)
-        return res.json().get("text", "") if res.status_code == 200 else ""
-    except: return ""
+        if res.status_code == 200:
+            return res.json().get("text", "")
+        print(f"❌ STT Failed: {res.status_code}")
+        return ""
+    except Exception as e:
+        print(f"❌ STT Exception: {e}")
+        return ""
 
 async def text_to_speech(text: str):
+    """Mengubah teks menjadi audio menggunakan service TTS."""
     try:
-        payload = {"text": text, "voice": "en_US-lessac-medium"}
+        # Menggunakan en_US (S besar) sesuai hasil tes Postman Anda yang working
+        payload = {
+            "text": text,
+            "voice": "en_US-lessac-medium" 
+        }
         res = await http_client.post(TTS_URL, json=payload)
-        return res.content if res.status_code == 200 else b""
-    except: return b""
+        
+        if res.status_code == 200:
+            return res.content
+        else:
+            print(f"❌ TTS Server Error: {res.status_code} - {res.text}")
+            return b""
+    except Exception as e:
+        print(f"❌ TTS Connection Error: {e}")
+        return b""
 
 # ======================================================
 # ENDPOINTS
@@ -91,10 +77,12 @@ async def text_to_speech(text: str):
 
 @app.get("/welcome")
 async def welcome():
-    # GANTI: Sekarang mengambil teks dari database
-    welcome_text = await get_welcome_message_from_db()
-    
-    print(f"📢 Sending Welcome from DB: {welcome_text}")
+    """
+    Endpoint yang dipanggil browser saat pertama kali 'Call' dimulai.
+    Memberikan suara sambutan tanpa menunggu user bicara.
+    """
+    welcome_text = "Hello, this is trial for TTS."
+    print(f"📢 Sending Welcome: {welcome_text}")
     
     audio_bytes = await text_to_speech(welcome_text)
     audio_hex = audio_bytes.hex() if audio_bytes else ""
@@ -106,18 +94,36 @@ async def welcome():
 
 @app.post("/chat")
 async def chat(file: UploadFile = File(...)):
+    """
+    Endpoint utama untuk percakapan.
+    Menerima Audio -> STT -> Gemini -> TTS -> Hex Audio Response.
+    """
     try:
+        # 1. Baca audio dari request
         audio_in_bytes = await file.read()
+        
+        # 2. Proses STT (Voice to Text)
         user_text = await speech_to_text(audio_in_bytes)
+        print(f"👤 User: {user_text}")
 
         if not user_text or not user_text.strip():
-            return {"user_text": "", "ai_text": "I couldn't hear you.", "audio_base64": ""}
+            return {
+                "user_text": "",
+                "ai_text": "I couldn't hear you clearly.",
+                "audio_base64": ""
+            }
 
+        # 3. Kirim teks ke Gemini AI
         model = genai.GenerativeModel(AI_MODEL)
+        # to_thread agar pemrosesan AI tidak mengunci server
         response = await asyncio.to_thread(model.generate_content, user_text)
         ai_text = response.text
+        print(f"🤖 AI: {ai_text}")
 
+        # 4. Proses TTS (Text to Voice)
         audio_out_bytes = await text_to_speech(ai_text)
+        
+        # 5. Konversi ke HEX String (Sesuai kebutuhan deepcall.js Anda)
         audio_hex = audio_out_bytes.hex() if audio_out_bytes else ""
 
         return {
@@ -125,12 +131,23 @@ async def chat(file: UploadFile = File(...)):
             "ai_text": ai_text,
             "audio_base64": audio_hex
         }
+
     except Exception as e:
+        print(f"🔥 CRITICAL ERROR: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/")
 async def home():
-    return {"status": "Online", "database": "Connected via Tunnel"}
+    """Health Check."""
+    return {
+        "status": "Online",
+        "mode": "HTTP_VOICE_CALL",
+        "endpoints": ["/welcome", "/chat"]
+    }
+
+# ======================================================
+# RUNNER
+# ======================================================
 
 if __name__ == "__main__":
     import uvicorn
