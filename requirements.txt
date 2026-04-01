@@ -10,3 +10,4 @@ numpy
 webrtcvad
 aiomysql
 cryptography
+mysql-connector-python
