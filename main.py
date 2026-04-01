@@ -4,6 +4,8 @@ import asyncio
 import httpx
 import re
 import aiomysql
+import wave
+import io
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -109,6 +111,40 @@ async def stream_gemini_sentences(text: str):
             buffer = ""
 
 # ======================================================
+# CONVERT WAV TO PCM
+# ======================================================
+
+def wav_to_pcm16(wav_bytes: bytes) -> bytes:
+    try:
+        with wave.open(io.BytesIO(wav_bytes), 'rb') as wf:
+            channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            framerate = wf.getframerate()
+
+            print(f"🔊 WAV INFO → channels={channels}, width={sample_width}, rate={framerate}")
+
+            frames = wf.readframes(wf.getnframes())
+
+            # ✅ convert ke mono kalau stereo
+            if channels == 2:
+                import struct
+                mono = bytearray()
+
+                for i in range(0, len(frames), 4):  # 2 channel × 2 byte
+                    left = struct.unpack('<h', frames[i:i+2])[0]
+                    right = struct.unpack('<h', frames[i+2:i+4])[0]
+                    avg = int((left + right) / 2)
+                    mono.extend(struct.pack('<h', avg))
+
+                frames = bytes(mono)
+
+            return frames
+
+    except Exception as e:
+        print(f"❌ WAV DECODE ERROR: {e}")
+        return b""
+
+# ======================================================
 # AUDIO STREAMER HELPER
 # ======================================================
 
@@ -116,30 +152,38 @@ async def process_and_send_audio(ws: WebSocket, text: str):
     if not text.strip():
         return
 
+    # Kirim teks ke UI
     await ws.send_json({
         "type": "ai-text",
         "text": text
     })
 
+    # Ambil audio dari TTS
     audio_bytes = await text_to_speech(text)
 
-   
-    if audio_bytes[:4] == b'RIFF':
-        audio_bytes = audio_bytes[44:]
+    if not audio_bytes:
+        return
 
+    # ✅ FIX UTAMA: decode WAV → PCM
+    if audio_bytes[:4] == b'RIFF':
+        audio_bytes = wav_to_pcm16(audio_bytes)
+
+    if not audio_bytes:
+        return
+
+    # ✅ streaming chunk aman
     chunk_size = 1024
 
     for i in range(0, len(audio_bytes), chunk_size):
         chunk = audio_bytes[i:i + chunk_size]
 
-       
+        # wajib genap (PCM16)
         if len(chunk) % 2 != 0:
             chunk = chunk[:-1]
 
         if chunk:
             await ws.send_bytes(chunk)
             await asyncio.sleep(0.005)
-
 # ======================================================
 # WEBSOCKET REALTIME
 # ======================================================
