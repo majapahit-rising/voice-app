@@ -190,19 +190,21 @@ async def process_and_send_audio(ws: WebSocket, text: str):
 
 @app.websocket("/ws/deepcall")
 async def deepcall(ws: WebSocket):
+    print("🔥 STEP 1: MASUK FUNCTION")
     await ws.accept()
     print("🚀 Connection established")
 
     audio_buffer = bytearray()
     is_ai_speaking = False
-
+    print("🔥 STEP 3: SEBELUM WELCOME")    
     # --- ACTION: WELCOME MESSAGE ---
     # Dipicu langsung saat koneksi WebSocket berhasil terbuka
-    welcome_text = await get_welcome_message_from_db()
+    welcome_text = "Hello! How can I help you today?"
     print(f"📢 Welcome Message: {welcome_text}")
     
     is_ai_speaking = True
     await process_and_send_audio(ws, welcome_text)
+    print("🔥 STEP 5: SELESAI KIRIM AUDIO")
     is_ai_speaking = False
 
     try:
